@@ -1,7 +1,7 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║   KANTİTATİF TEKNİK & TEMEL ANALİZ ARACI - v23.0 WEB       ║
-║   Bulut Uyumlu · User-Agent · Fallback    ║
+║   KANTİTATİF TEKNİK & TEMEL ANALİZ ARACI - v24.0 WEB       ║
+║   Güçlü Retry · Tam Tarayıcı Profili    ║
 ╚══════════════════════════════════════════════════════════════╝
 
 Çalıştırma:
@@ -28,7 +28,7 @@ from plotly.subplots import make_subplots
 #  SAYFA AYARLARI
 # ══════════════════════════════════════════════════════════════
 st.set_page_config(
-    page_title="Kantitatif Analiz Aracı v23",
+    page_title="Kantitatif Analiz Aracı v24",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -62,34 +62,80 @@ st.markdown("""
 
 
 # ──────────────────────────────────────────────────────────────
-#  BULUT UYUMLU SESSION & LOG
+#  BULUT UYUMLU SESSION & LOG  (Gelişmiş — v24)
 # ──────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.WARNING,
                     format="%(asctime)s [%(levelname)s] %(message)s")
 _LOG = logging.getLogger("hisse_analiz")
 
-_UA_LIST = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
-    "(KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
+# Gerçek tarayıcı profillerini tam taklit eden header setleri
+_BROWSER_PROFILES = [
+    {   # Chrome 124 / Windows
+        "User-Agent"     : ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/124.0.0.0 Safari/537.36"),
+        "Accept"         : ("text/html,application/xhtml+xml,application/xml;"
+                            "q=0.9,image/avif,image/webp,*/*;q=0.8"),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer"        : "https://finance.yahoo.com/",
+        "Origin"         : "https://finance.yahoo.com",
+        "Connection"     : "keep-alive",
+        "Sec-Fetch-Dest" : "document",
+        "Sec-Fetch-Mode" : "navigate",
+        "Sec-Fetch-Site" : "same-origin",
+        "DNT"            : "1",
+    },
+    {   # Safari 17 / macOS
+        "User-Agent"     : ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                            "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                            "Version/17.4 Safari/605.1.15"),
+        "Accept"         : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-GB,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer"        : "https://finance.yahoo.com/",
+        "Connection"     : "keep-alive",
+    },
+    {   # Firefox 125 / Linux
+        "User-Agent"     : ("Mozilla/5.0 (X11; Linux x86_64; rv:125.0) "
+                            "Gecko/20100101 Firefox/125.0"),
+        "Accept"         : ("text/html,application/xhtml+xml,application/xml;"
+                            "q=0.9,image/avif,image/webp,*/*;q=0.8"),
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer"        : "https://finance.yahoo.com/",
+        "Connection"     : "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    },
 ]
 
 
-def _yeni_session() -> requests.Session:
-    """Retry + random User-Agent ile bulut sunucu dostu oturum üretir."""
+def _yeni_session(profil_idx: int = -1) -> requests.Session:
+    """Tam tarayıcı profilini taklit eden session üretir (-1 = rastgele)."""
+    profil = (_BROWSER_PROFILES[profil_idx % len(_BROWSER_PROFILES)]
+              if profil_idx >= 0
+              else random.choice(_BROWSER_PROFILES))
     s = requests.Session()
-    s.headers.update({
-        "User-Agent": random.choice(_UA_LIST),
-        "Accept"    : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-    })
-    retry = Retry(total=3, backoff_factor=0.5,
-                  status_forcelist=[429, 500, 502, 503, 504])
+    s.headers.update(profil)
+    retry = Retry(
+        total=4, backoff_factor=0.8,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "POST"],
+    )
     s.mount("https://", HTTPAdapter(max_retries=retry))
     s.mount("http://",  HTTPAdapter(max_retries=retry))
     return s
+
+
+def _df_temizle(df) -> "pd.DataFrame | None":
+    """MultiIndex düzelt, datetime'a çevir, NaN satırları temizle."""
+    if df is None or (hasattr(df, "empty") and df.empty):
+        return None
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    df.index = pd.to_datetime(df.index)
+    df = df[df["Close"].notna()]
+    return df if not df.empty else None
 
 # ══════════════════════════════════════════════════════════════
 #  RENK PALETİ
@@ -177,32 +223,59 @@ TIP = {
 #  1. VERİ ÇEKİMİ
 # ══════════════════════════════════════════════════════════════
 @st.cache_data(ttl=900, show_spinner=False)
-def veri_cek(sembol: str) -> pd.DataFrame | None:
+def veri_cek(sembol: str) -> "pd.DataFrame | None":
+    """
+    3 kademeli, bulut sunucu blok-aşan veri çekimi:
+      1. Tam tarayıcı profilli session + Ticker.history("1y")
+      2. Farklı profil + yf.download() ile 1y tarih aralığı
+      3. Daha kısa aralık (6ay) + session'sız yf.download()
+    """
     bitis     = datetime.today()
-    baslangic = bitis - timedelta(days=365)
+    bas_1y    = (bitis - timedelta(days=365)).strftime("%Y-%m-%d")
+    bas_6m    = (bitis - timedelta(days=185)).strftime("%Y-%m-%d")
+    bitis_str = bitis.strftime("%Y-%m-%d")
+
+    # ── Kademe 1: Ticker.history + tam tarayıcı session ─────────
     try:
-        ses = _yeni_session()
-        df  = yf.download(sembol,
-                          start=baslangic.strftime("%Y-%m-%d"),
-                          end=bitis.strftime("%Y-%m-%d"),
-                          progress=False, auto_adjust=True,
-                          session=ses)
-    except Exception as e:
-        _LOG.warning("veri_cek session hatasi [%s]: %s — session'siz deneniyor", sembol, e)
-        try:
-            df = yf.download(sembol,
-                             start=baslangic.strftime("%Y-%m-%d"),
-                             end=bitis.strftime("%Y-%m-%d"),
-                             progress=False, auto_adjust=True)
-        except Exception as e2:
-            _LOG.error("veri_cek tamamen basarisiz [%s]: %s", sembol, e2)
-            return None
-    if df.empty: return None
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    df.index = pd.to_datetime(df.index)
-    df = df[df["Close"].notna()]
-    return df if not df.empty else None
+        ses1    = _yeni_session(0)          # Chrome profili
+        ticker1 = yf.Ticker(sembol, session=ses1)
+        df1     = ticker1.history(period="1y", auto_adjust=True)
+        result  = _df_temizle(df1)
+        if result is not None:
+            _LOG.info("veri_cek K1 basarili [%s] %d gun", sembol, len(result))
+            return result
+        _LOG.warning("veri_cek K1 bos dondü [%s]", sembol)
+    except Exception as e1:
+        _LOG.warning("veri_cek K1 hata [%s]: %s", sembol, e1)
+
+    # ── Kademe 2: yf.download + farklı tarayıcı profili ─────────
+    try:
+        import time; time.sleep(1.5)        # kısa bekleme — rate limit aşımı
+        ses2 = _yeni_session(1)             # Safari profili
+        df2  = yf.download(sembol, start=bas_1y, end=bitis_str,
+                           progress=False, auto_adjust=True, session=ses2)
+        result = _df_temizle(df2)
+        if result is not None:
+            _LOG.info("veri_cek K2 basarili [%s] %d gun", sembol, len(result))
+            return result
+        _LOG.warning("veri_cek K2 bos dondü [%s]", sembol)
+    except Exception as e2:
+        _LOG.warning("veri_cek K2 hata [%s]: %s", sembol, e2)
+
+    # ── Kademe 3: Kısa aralık + session'sız ─────────────────────
+    try:
+        import time; time.sleep(2.0)
+        df3 = yf.download(sembol, start=bas_6m, end=bitis_str,
+                          progress=False, auto_adjust=True)
+        result = _df_temizle(df3)
+        if result is not None:
+            _LOG.warning("veri_cek K3 (6ay kisaltilmis) basarili [%s]", sembol)
+            return result
+    except Exception as e3:
+        _LOG.error("veri_cek K3 hata [%s]: %s", sembol, e3)
+
+    _LOG.error("veri_cek tum kademeler basarisiz [%s]", sembol)
+    return None
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -1190,7 +1263,7 @@ for _k, _v in [("radar_piyasa","ABD"),("radar_sembol",None),
 #  SIDEBAR
 # ══════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.markdown("## 📈 Analiz Aracı v23.0")
+    st.markdown("## 📈 Analiz Aracı v24.0")
     st.markdown("---")
 
     # ── Radar Bölümü ──────────────────────────────────────────
@@ -1268,7 +1341,7 @@ with st.sidebar:
     )
     st.markdown("---")
     st.markdown("""
-**Özellikler (v23.0):**
+**Özellikler (v24.0):**
 - 🔍 YZ Hisse Radarı (ABD/BIST)
 - 📐 RSI · MACD · ATR · SMA50/200
 - 📊 MA5/10 · Stokastik · Pivot
@@ -1284,7 +1357,7 @@ with st.sidebar:
 #  ANA UYGULAMA
 # ══════════════════════════════════════════════════════════════
 st.title("📊 Kantitatif Teknik & Temel Analiz Aracı")
-st.caption("v17.0  |  Bulut Uyumlu · User-Agent · Fallback · Tek Buton Mantığı")
+st.caption("v17.0  |  Güçlü Retry · Tam Tarayıcı Profili · Tek Buton Mantığı")
 
 # Session state'den aktif sembol ve tetik bilgisini al
 _analiz_baslat = st.session_state.get("analiz_baslat", False) or analiz_btn
@@ -1312,7 +1385,12 @@ with st.spinner(f"📡 {sembol_input} verileri çekiliyor..."):
     haberler = haber_cek(sembol_input)
 
 if df_ham is None:
-    st.error(f"❌ **{sembol_input}** için fiyat verisi bulunamadı. Sembolü kontrol edin.")
+    st.error(
+    f"❌ **{sembol_input}** için fiyat verisi alınamadı. "
+    "Yahoo Finance sunucuları şu an yanıt vermiyor olabilir. "
+    "Lütfen 10–15 saniye bekleyip tekrar deneyin. "
+    "Sembol yanlışsa düzeltin (BIST için .IS ekleyin: THYAO.IS)."
+)
     st.stop()
 
 df = hesapla_gostergeler(df_ham.copy())
