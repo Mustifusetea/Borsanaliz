@@ -1,7 +1,7 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║   KANTİTATİF TEKNİK & TEMEL ANALİZ ARACI - v22.0 WEB       ║
-║   Sekmeli UX · Header · Tabs    ║
+║   KANTİTATİF TEKNİK & TEMEL ANALİZ ARACI - v23.0 WEB       ║
+║   Bulut Uyumlu · User-Agent · Fallback    ║
 ╚══════════════════════════════════════════════════════════════╝
 
 Çalıştırma:
@@ -9,7 +9,10 @@
     streamlit run hisse_analiz_web.py
 """
 
-import os, warnings, random
+import os, warnings, random, logging
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from datetime import datetime, timedelta
 
 warnings.filterwarnings("ignore")
@@ -25,7 +28,7 @@ from plotly.subplots import make_subplots
 #  SAYFA AYARLARI
 # ══════════════════════════════════════════════════════════════
 st.set_page_config(
-    page_title="Kantitatif Analiz Aracı v22",
+    page_title="Kantitatif Analiz Aracı v23",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -56,6 +59,37 @@ st.markdown("""
                    padding:8px 14px; border-radius:0 8px 8px 0; margin:4px 0; }
 </style>
 """, unsafe_allow_html=True)
+
+
+# ──────────────────────────────────────────────────────────────
+#  BULUT UYUMLU SESSION & LOG
+# ──────────────────────────────────────────────────────────────
+logging.basicConfig(level=logging.WARNING,
+                    format="%(asctime)s [%(levelname)s] %(message)s")
+_LOG = logging.getLogger("hisse_analiz")
+
+_UA_LIST = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
+]
+
+
+def _yeni_session() -> requests.Session:
+    """Retry + random User-Agent ile bulut sunucu dostu oturum üretir."""
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": random.choice(_UA_LIST),
+        "Accept"    : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+    })
+    retry = Retry(total=3, backoff_factor=0.5,
+                  status_forcelist=[429, 500, 502, 503, 504])
+    s.mount("https://", HTTPAdapter(max_retries=retry))
+    s.mount("http://",  HTTPAdapter(max_retries=retry))
+    return s
 
 # ══════════════════════════════════════════════════════════════
 #  RENK PALETİ
@@ -146,9 +180,23 @@ TIP = {
 def veri_cek(sembol: str) -> pd.DataFrame | None:
     bitis     = datetime.today()
     baslangic = bitis - timedelta(days=365)
-    df = yf.download(sembol, start=baslangic.strftime("%Y-%m-%d"),
-                     end=bitis.strftime("%Y-%m-%d"),
-                     progress=False, auto_adjust=True)
+    try:
+        ses = _yeni_session()
+        df  = yf.download(sembol,
+                          start=baslangic.strftime("%Y-%m-%d"),
+                          end=bitis.strftime("%Y-%m-%d"),
+                          progress=False, auto_adjust=True,
+                          session=ses)
+    except Exception as e:
+        _LOG.warning("veri_cek session hatasi [%s]: %s — session'siz deneniyor", sembol, e)
+        try:
+            df = yf.download(sembol,
+                             start=baslangic.strftime("%Y-%m-%d"),
+                             end=bitis.strftime("%Y-%m-%d"),
+                             progress=False, auto_adjust=True)
+        except Exception as e2:
+            _LOG.error("veri_cek tamamen basarisiz [%s]: %s", sembol, e2)
+            return None
     if df.empty: return None
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -159,57 +207,118 @@ def veri_cek(sembol: str) -> pd.DataFrame | None:
 
 @st.cache_data(ttl=900, show_spinner=False)
 def temel_veri_cek(sembol: str) -> dict:
-    try:
-        ticker = yf.Ticker(sembol)
-        info   = ticker.info
-        veri = {
-            "sirket_adi"    : info.get("longName") or info.get("shortName") or sembol,
-            "sektor"        : info.get("sector",   "---"),
-            "endustri"      : info.get("industry", "---"),
-            "ozet"          : info.get("longBusinessSummary", ""),
-            "ulke"          : info.get("country", "---"),
-            "web"           : info.get("website", ""),
-            "calisan_sayisi": info.get("fullTimeEmployees"),
-            "piyasa_degeri" : info.get("marketCap"),
-            "hedef_fiyat"   : _f(info.get("targetMeanPrice")),
-            "fk_orani"      : _f(info.get("trailingPE")),
-            "kar_marji"     : _f(info.get("profitMargins")),
-            "borc_ozkaynak"   : _f(info.get("debtToEquity")),
-            "haftalik_dip"    : _f(info.get("fiftyTwoWeekLow")),
-            "haftalik_zirve"  : _f(info.get("fiftyTwoWeekHigh")),
-        }
-        # Bilanço tarihi
-        bilanco = "Bulunamadı"
-        try:
-            cal = ticker.calendar
-            if cal is not None:
-                if isinstance(cal, dict):
-                    ed = cal.get("Earnings Date")
-                    if ed: bilanco = str(ed[0] if isinstance(ed,list) else ed)[:10]
-                elif hasattr(cal,"columns") and "Earnings Date" in cal.columns:
-                    bilanco = str(cal["Earnings Date"].iloc[0])[:10]
-        except: pass
-        veri["bilanco_tarihi"] = bilanco
+    """
+    Bulut uyumlu temel veri çekimi:
+    1. User-Agent session ile ticker.info dene
+    2. info boş/eksikse fast_info ile kritik alanları doldur
+    3. Yedek: session'siz Ticker (son çare)
+    """
+    ses = _yeni_session()
 
-        # Temettü geçmişi
-        veri["son_temettu_tarih"] = "Veri Yok"
-        veri["_temettu_miktar"]   = None
-        veri["_temettu_verimi"]   = None
+    # ── Aşama 1: session ile ticker.info ─────────────────────
+    info = {}
+    try:
+        ticker = yf.Ticker(sembol, session=ses)
+        raw    = ticker.info
+        # info bazen {'trailingPegRatio': None} gibi sadece 1-2 alan döner
+        if raw and len(raw) > 5:
+            info = raw
+            _LOG.info("temel_veri_cek: info OK [%s] (%d alan)", sembol, len(info))
+        else:
+            _LOG.warning("temel_veri_cek: info zayif [%s] (%d alan) — fast_info deneniyor",
+                         sembol, len(raw) if raw else 0)
+    except Exception as e:
+        _LOG.warning("temel_veri_cek: ticker.info hatasi [%s]: %s", sembol, e)
+        # Yedek: session'siz dene
         try:
-            divs = ticker.dividends
-            if divs is not None and not divs.empty:
-                son_miktar = _f(float(divs.iloc[-1]))
-                if son_miktar is not None:
-                    veri["_temettu_miktar"]  = son_miktar
-                    veri["son_temettu_tarih"] = str(divs.index[-1])[:10]
-                    # Temettü verimi = yıllık temettü / güncel fiyat tahmini
-                    yillik = _f(info.get("trailingAnnualDividendRate"))
-                    fiyat  = _f(info.get("currentPrice") or info.get("regularMarketPrice"))
-                    if yillik and fiyat and fiyat > 0:
-                        veri["_temettu_verimi"] = (yillik / fiyat) * 100
-        except: pass
-        return veri
-    except: return {}
+            ticker = yf.Ticker(sembol)
+            raw    = ticker.info
+            if raw and len(raw) > 5:
+                info = raw
+        except Exception as e2:
+            _LOG.error("temel_veri_cek: tamamen basarisiz [%s]: %s", sembol, e2)
+            ticker = yf.Ticker(sembol)  # en azından fast_info için
+
+    # ── Aşama 2: fast_info fallback ──────────────────────────
+    # Kritik sayısal alanlar boşsa fast_info / basic_info ile doldur
+    def _fast_fallback(field_info, fast_attr, ticker_obj):
+        """info'da yoksa fast_info/basic_info'dan almayı dene."""
+        if _f(field_info) is not None:
+            return field_info
+        try:
+            fi = getattr(ticker_obj, 'fast_info', None)
+            if fi and hasattr(fi, fast_attr):
+                return getattr(fi, fast_attr)
+        except Exception:
+            pass
+        return field_info
+
+    # fast_info alanları: three_month_average_volume, last_price, year_high, year_low vb.
+    try:
+        fi = getattr(ticker, 'fast_info', None)
+        if fi:
+            if not info.get('fiftyTwoWeekLow'):  info['fiftyTwoWeekLow']  = getattr(fi,'year_low',  None)
+            if not info.get('fiftyTwoWeekHigh'): info['fiftyTwoWeekHigh'] = getattr(fi,'year_high', None)
+            if not info.get('marketCap'):        info['marketCap']        = getattr(fi,'market_cap',None)
+            if not info.get('currentPrice'):     info['currentPrice']     = getattr(fi,'last_price', None)
+            _LOG.info("temel_veri_cek: fast_info tamamlama yapildi [%s]", sembol)
+    except Exception as fe:
+        _LOG.warning("temel_veri_cek: fast_info hatasi [%s]: %s", sembol, fe)
+
+    # ── Veri sözlüğü ─────────────────────────────────────────
+    veri = {
+        "sirket_adi"    : info.get("longName") or info.get("shortName") or sembol,
+        "sektor"        : info.get("sector",   "---"),
+        "endustri"      : info.get("industry", "---"),
+        "ozet"          : info.get("longBusinessSummary", ""),
+        "ulke"          : info.get("country", "---"),
+        "web"           : info.get("website", ""),
+        "calisan_sayisi": info.get("fullTimeEmployees"),
+        "piyasa_degeri" : info.get("marketCap"),
+        "hedef_fiyat"   : _f(info.get("targetMeanPrice")),
+        "fk_orani"      : _f(info.get("trailingPE")),
+        "kar_marji"     : _f(info.get("profitMargins")),
+        "borc_ozkaynak" : _f(info.get("debtToEquity")),
+        "haftalik_dip"  : _f(info.get("fiftyTwoWeekLow")),
+        "haftalik_zirve": _f(info.get("fiftyTwoWeekHigh")),
+    }
+
+    _LOG.info("temel_veri_cek: FK=%s KM=%s BD=%s [%s]",
+             veri['fk_orani'], veri['kar_marji'], veri['borc_ozkaynak'], sembol)
+
+    # ── Bilanço tarihi ────────────────────────────────────────
+    bilanco = "Bulunamadı"
+    try:
+        cal = ticker.calendar
+        if cal is not None:
+            if isinstance(cal, dict):
+                ed = cal.get("Earnings Date")
+                if ed: bilanco = str(ed[0] if isinstance(ed,list) else ed)[:10]
+            elif hasattr(cal,"columns") and "Earnings Date" in cal.columns:
+                bilanco = str(cal["Earnings Date"].iloc[0])[:10]
+    except Exception as be:
+        _LOG.debug("bilanco tarihi alinamadi [%s]: %s", sembol, be)
+    veri["bilanco_tarihi"] = bilanco
+
+    # ── Temettü geçmişi ───────────────────────────────────────
+    veri["son_temettu_tarih"] = "Veri Yok"
+    veri["_temettu_miktar"]   = None
+    veri["_temettu_verimi"]   = None
+    try:
+        divs = ticker.dividends
+        if divs is not None and not divs.empty:
+            son_miktar = _f(float(divs.iloc[-1]))
+            if son_miktar is not None:
+                veri["_temettu_miktar"]   = son_miktar
+                veri["son_temettu_tarih"] = str(divs.index[-1])[:10]
+                yillik = _f(info.get("trailingAnnualDividendRate"))
+                fiyat  = _f(info.get("currentPrice") or info.get("regularMarketPrice"))
+                if yillik and fiyat and fiyat > 0:
+                    veri["_temettu_verimi"] = (yillik / fiyat) * 100
+    except Exception as de:
+        _LOG.debug("temettu alinamadi [%s]: %s", sembol, de)
+
+    return veri
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -1081,7 +1190,7 @@ for _k, _v in [("radar_piyasa","ABD"),("radar_sembol",None),
 #  SIDEBAR
 # ══════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.markdown("## 📈 Analiz Aracı v22.0")
+    st.markdown("## 📈 Analiz Aracı v23.0")
     st.markdown("---")
 
     # ── Radar Bölümü ──────────────────────────────────────────
@@ -1159,7 +1268,7 @@ with st.sidebar:
     )
     st.markdown("---")
     st.markdown("""
-**Özellikler (v22.0):**
+**Özellikler (v23.0):**
 - 🔍 YZ Hisse Radarı (ABD/BIST)
 - 📐 RSI · MACD · ATR · SMA50/200
 - 📊 MA5/10 · Stokastik · Pivot
@@ -1175,7 +1284,7 @@ with st.sidebar:
 #  ANA UYGULAMA
 # ══════════════════════════════════════════════════════════════
 st.title("📊 Kantitatif Teknik & Temel Analiz Aracı")
-st.caption("v17.0  |  Sekmeli UX · Header · Tabs · Tek Buton Mantığı")
+st.caption("v17.0  |  Bulut Uyumlu · User-Agent · Fallback · Tek Buton Mantığı")
 
 # Session state'den aktif sembol ve tetik bilgisini al
 _analiz_baslat = st.session_state.get("analiz_baslat", False) or analiz_btn
